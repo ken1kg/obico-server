@@ -502,6 +502,10 @@ SYNDICATES = {
     'display_name': 'Obico',
     'from_email': DEFAULT_FROM_EMAIL,
     'docRoot': 'https://www.obico.io/docs/',
+    'turn_server': 'turn.obico.io',
+    'turn_port': 80,
+    'turn_user': '',
+    'turn_password': '',
   },
   'jusprin': {
     'display_name': 'JusPrin',
