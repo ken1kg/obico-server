@@ -8,24 +8,34 @@ let printerWebRTCUrl = (printerId) => `/ws/janus/${printerId}/`
 let printerSharedWebRTCUrl = (token) => `/ws/share_token/janus/${token}/`
 
 function iceServers(authToken) {
-  const turnServer = syndicate()?.turn_server
+  const currentSyndicate = syndicate()
+
+  // 1. Get Settings from Backend (injected by context_processors.py)
+  const turnServer = currentSyndicate?.turn_server
+  const turnUser = currentSyndicate?.turn_user
+  const turnPassword = currentSyndicate?.turn_password
+  
+  // 2. Dynamic Port Logic: Use backend port, or fallback to 80 (original default)
+  const turnPort = currentSyndicate?.turn_port || 80
+
   const servers = [
     {
       urls: ['stun:stun.l.google.com:19302'],
     }
   ]
 
-  if (turnServer) {
+  // 3. Add TURN server using specific credentials and port
+  if (turnServer && turnUser && turnPassword) {
     servers.push(
       {
-        urls: `turn:${turnServer}:80?transport=udp`,
-        credential: authToken,
-        username: authToken,
+        urls: `turn:${turnServer}:${turnPort}?transport=udp`,
+        credential: turnPassword,
+        username: turnUser,
       },
       {
-        urls: `turn:${turnServer}:80?transport=tcp`,
-        credential: authToken,
-        username: authToken,
+        urls: `turn:${turnServer}:${turnPort}?transport=tcp`,
+        credential: turnPassword,
+        username: turnUser,
       }
     );
   }
