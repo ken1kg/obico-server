@@ -8,7 +8,11 @@ let printerWebRTCUrl = (printerId) => `/ws/janus/${printerId}/`
 let printerSharedWebRTCUrl = (token) => `/ws/share_token/janus/${token}/`
 
 function iceServers(authToken) {
+  const currentSyndicate = syndicate()
   const turnServer = syndicate()?.turn_server
+  const turnUser = currentSyndicate?.turn_user
+  const turnPassword = currentSyndicate?.turn_password
+  const turnPort = currentSyndicate?.turn_port || 80
   const servers = [
     {
       urls: ['stun:stun.l.google.com:19302'],
@@ -16,16 +20,19 @@ function iceServers(authToken) {
   ]
 
   if (turnServer) {
+    const useStaticAuth = turnUser && turnPassword;
+    const turnAuthUser = useStaticAuth ? turnUser : authToken;
+    const turnAuthPass = useStaticAuth ? turnPassword : authToken;
     servers.push(
       {
-        urls: `turn:${turnServer}:80?transport=udp`,
-        credential: authToken,
-        username: authToken,
+        urls: `turn:${turnServer}:${turnPort}?transport=udp`,
+        credential: turnAuthPass,
+        username: turnAuthUser,
       },
       {
-        urls: `turn:${turnServer}:80?transport=tcp`,
-        credential: authToken,
-        username: authToken,
+        urls: `turn:${turnServer}:${turnPort}?transport=tcp`,
+        credential: turnAuthPass,
+        username: turnAuthUser,
       }
     );
   }
