@@ -73,3 +73,10 @@
 # LLM_BASE_URL=
 # VLM_API_KEY=
 # VLM_BASE_URL=
+
+# --- Do not enable below unless you know what you are doing ---
+# Custom TURN Server Configuration. Only support Long Term Credential (lt-cred-mech) as moonraker-obico services does not support auto refresh auth-secret (REST API) without restarting the service
+# TURN_SERVER=turn.obico.io
+# TURN_PORT=80
+# TURN_USER=yourturnusername
+# TURN_PASSWORD=yourturnpassword
