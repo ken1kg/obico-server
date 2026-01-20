@@ -507,6 +507,10 @@ SYNDICATES = {
     'display_name': 'Obico',
     'from_email': DEFAULT_FROM_EMAIL,
     'docRoot': 'https://www.obico.io/docs/',
+    'turn_server': os.environ.get('TURN_SERVER') or 'turn.obico.io',
+    'turn_port': int(os.environ.get('TURN_PORT') or 80),
+    'turn_user': os.environ.get('TURN_USER') or '',
+    'turn_password': os.environ.get('TURN_PASSWORD') or '',
   },
   'jusprin': {
     'display_name': 'JusPrin',
