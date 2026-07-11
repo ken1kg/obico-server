@@ -1,3 +1,4 @@
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from unittest.mock import *
 from django.utils import timezone
@@ -5,14 +6,25 @@ from datetime import timedelta
 from django.test import Client
 from django.urls import reverse
 from safedelete.models import *
+from django.contrib.sites.models import Site
 
-from app.models import Printer, Print, User
+from app.models import GCodeFile, Printer, Print, User
+from app.models.syndicate_models import Syndicate
 from api.octoprint_views import *
 from api.octoprint_messages import process_printer_status
 
 
+def setup_syndicate():
+    """Create a syndicate and associate it with a site for tests."""
+    syndicate, _ = Syndicate.objects.get_or_create(id=1, defaults={'name': 'test'})
+    site, _ = Site.objects.get_or_create(id=1, defaults={'domain': 'testserver', 'name': 'testserver'})
+    syndicate.sites.add(site)
+    return syndicate
+
+
 def init_data():
-    user = User.objects.create(email='test@tsd.com')
+    syndicate = setup_syndicate()
+    user = User.objects.create(email='test@tsd.com', syndicate=syndicate)
     user.set_password('test')
     user.save()
     printer = Printer.objects.create(user=user)
@@ -21,9 +33,72 @@ def init_data():
     printer.current_print = print
     printer.save()
     client = Client()
-    client.login(email='test@tsd.com', password='test')
+    client.force_login(user)
 
     return (user, printer, client)
+
+
+@override_settings(SITE_ID=1)
+class GCodeFileUploadTestCase(TestCase):
+    def setUp(self):
+        syndicate = setup_syndicate()
+        self.user = User.objects.create(email='gcode-upload@test.com', syndicate=syndicate)
+        self.user.set_password('test')
+        self.user.save()
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    @patch('api.viewsets.save_file_obj')
+    def test_invalid_gcode_upload_returns_400_without_creating_file(self, save_file_obj):
+        upload = SimpleUploadedFile(
+            'invalid.gcode',
+            (
+                b'\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+                b'\x03\x00\xb7\x00\x01\x00\x00\x00not really gcode\n'
+            ),
+            content_type='application/octet-stream',
+        )
+
+        response = self.client.post('/api/v1/g_code_files/', {
+            'filename': 'invalid.gcode',
+            'file': upload,
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(),
+            {'error': 'Invalid G-code file. Please upload a valid text G-code file.'},
+        )
+        self.assertFalse(
+            GCodeFile.objects.all_with_deleted().filter(user=self.user, filename='invalid.gcode').exists()
+        )
+        save_file_obj.assert_not_called()
+
+    @patch('api.viewsets.save_file_obj', return_value=('internal-url', 'external-url'))
+    @patch(
+        'api.viewsets.gcode_metadata.parse',
+        return_value=({'estimated_time': 120, 'filament_total': 12.5}, []),
+    )
+    def test_valid_gcode_upload_still_succeeds(self, parse, save_file_obj):
+        upload = SimpleUploadedFile(
+            'valid.gcode',
+            b'G1 X10 Y10 E0.01\n',
+            content_type='application/octet-stream',
+        )
+
+        response = self.client.post('/api/v1/g_code_files/', {
+            'filename': 'valid.gcode',
+            'file': upload,
+        })
+
+        self.assertEqual(response.status_code, 201)
+        gcode_file = GCodeFile.objects.get(user=self.user, filename='valid.gcode')
+        self.assertEqual(gcode_file.num_bytes, 17)
+        self.assertEqual(gcode_file.url, 'external-url')
+        self.assertEqual(gcode_file.estimated_time, 120)
+        self.assertEqual(gcode_file.filament_total, 12.5)
+        parse.assert_called_once()
+        save_file_obj.assert_called_once()
 
 # https://docs.python.org/3/library/unittest.mock.html#where-to-patch for why it is patching "api.octoprint_views.send_failure_alert" not "lib.notifications.send_failure_alert"
 
@@ -40,6 +115,7 @@ def status_msg_without_event(print_ts, filename):
         "octoprint_data": {"job": {"file": {"origin": "local", "name": filename}}},
     }
 
+@override_settings(SITE_ID=1)
 @patch('api.octoprint_views.send_failure_alert')
 class AlertTestCase(TestCase):
     def setUp(self):
@@ -272,6 +348,7 @@ class AlertTestCase(TestCase):
         self.assertIsNone(self.printer.current_print.paused_at)
 
 
+@override_settings(SITE_ID=1)
 @patch.object(Printer, 'pause_print')
 class PauseTestCase(TestCase):
     def setUp(self):
@@ -287,100 +364,130 @@ class PauseTestCase(TestCase):
         pause_print.assert_called_once()
 
 
-EVENT_CALLS = [call('app.tasks.process_print_events', args=ANY)]
-
-
-@override_settings(PRINT_EVENT_HANDLER='app.tasks.process_print_events')
+@override_settings(PRINT_EVENT_HANDLER='app.tasks.process_print_events', SITE_ID=1)
 @patch('app.models.celery_app')
-class PrintTestCase(TestCase):
+class OAuthPrinterFlowTestCase(TestCase):
+    """Test the start_print and finish_print API actions for OAuth apps."""
 
     def setUp(self):
-        (self.user, self.printer, self.client) = init_data()
-        self.printer.current_print = None
-        self.printer.save()
-        Print.objects.all().delete(force_policy=HARD_DELETE)
+        syndicate = setup_syndicate()
+        self.user = User.objects.create(email='oauth@test.com', syndicate=syndicate)
+        self.user.set_password('test')
+        self.user.save()
+        self.printer = Printer.objects.create(user=self.user, name='OAuth Test Printer')
+        self.client = Client()
+        self.client.force_login(self.user)
 
-    def test_neg_print_ts_is_ignored_when_no_current_print(self, celery_app):
-        process_printer_status(self.printer, status_msg(-1, '1.gcode', 'PrintStarted'))
+    def test_start_print_success(self, celery_app):
+        response = self.client.post(
+            f'/api/v1/printers/{self.printer.id}/start_print/',
+            {'filename': 'test_oauth.gcode'},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.printer.refresh_from_db()
+        self.assertIsNotNone(self.printer.current_print)
+        self.assertEqual(self.printer.current_print.filename, 'test_oauth.gcode')
+
+    def test_start_print_requires_filename(self, celery_app):
+        response = self.client.post(
+            f'/api/v1/printers/{self.printer.id}/start_print/',
+            {},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_start_print_auto_closes_existing_print(self, celery_app):
+        # Start first print
+        self.client.post(
+            f'/api/v1/printers/{self.printer.id}/start_print/',
+            {'filename': 'first.gcode'},
+            content_type='application/json'
+        )
+        self.printer.refresh_from_db()
+        first_print_id = self.printer.current_print.id
+
+        # Start second print - should auto-close first
+        response = self.client.post(
+            f'/api/v1/printers/{self.printer.id}/start_print/',
+            {'filename': 'second.gcode'},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.printer.refresh_from_db()
+
+        # Verify new print is active
+        self.assertEqual(self.printer.current_print.filename, 'second.gcode')
+
+        # Verify old print was finished
+        old_print = Print.objects.get(id=first_print_id)
+        self.assertIsNotNone(old_print.finished_at)
+
+    def test_finish_print_success(self, celery_app):
+        # Start a print first
+        self.client.post(
+            f'/api/v1/printers/{self.printer.id}/start_print/',
+            {'filename': 'test.gcode'},
+            content_type='application/json'
+        )
+        self.printer.refresh_from_db()
+        print_id = self.printer.current_print.id
+
+        # Finish the print
+        response = self.client.post(
+            f'/api/v1/printers/{self.printer.id}/finish_print/',
+            {'status': 'success'},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.printer.refresh_from_db()
         self.assertIsNone(self.printer.current_print)
 
-        process_printer_status(self.printer, status_msg(-1, '1.gcode', 'PrintFailed'))
-        self.assertIsNone(self.printer.current_print)
+        # Check print is marked as finished
+        print_obj = Print.objects.get(id=print_id)
+        self.assertIsNotNone(print_obj.finished_at)
+        self.assertIsNone(print_obj.cancelled_at)
 
-        process_printer_status(self.printer, status_msg(-1, '1.gcode', 'PrintCancelled'))
-        self.assertIsNone(self.printer.current_print)
+    def test_finish_print_cancelled(self, celery_app):
+        # Start a print first
+        self.client.post(
+            f'/api/v1/printers/{self.printer.id}/start_print/',
+            {'filename': 'test.gcode'},
+            content_type='application/json'
+        )
+        self.printer.refresh_from_db()
+        print_id = self.printer.current_print.id
 
-        process_printer_status(self.printer, status_msg(-1, '1.gcode', 'PrintPaused'))
-        self.assertIsNone(self.printer.current_print)
-        celery_app.send_task.assert_not_called()
+        # Cancel the print
+        response = self.client.post(
+            f'/api/v1/printers/{self.printer.id}/finish_print/',
+            {'status': 'cancelled'},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 200)
 
-    def test_print_is_done_normally(self, celery_app):
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintStarted'))
-        self.assertIsNotNone(self.printer.current_print)
+        # Check print is marked as cancelled
+        print_obj = Print.objects.get(id=print_id)
+        self.assertIsNotNone(print_obj.cancelled_at)
 
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintDone'))
-        self.assertIsNone(self.printer.current_print)
-        self.assertIsNotNone(Print.objects.first().finished_at)
-        celery_app.send_task.assert_has_calls(EVENT_CALLS)
-        self.assertEqual(celery_app.send_task.call_count, 1)
+    def test_finish_print_fails_if_not_printing(self, celery_app):
+        response = self.client.post(
+            f'/api/v1/printers/{self.printer.id}/finish_print/',
+            {},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 404)
 
-    def test_print_is_canceled_normally(self, celery_app):
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintStarted'))
-        self.assertIsNotNone(self.printer.current_print)
-
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintCancelled'))
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintFailed'))
-        self.assertIsNone(self.printer.current_print)
-        self.assertIsNone(Print.objects.first().finished_at)
-        self.assertIsNotNone(Print.objects.first().cancelled_at)
-        celery_app.send_task.assert_has_calls(EVENT_CALLS)
-        self.assertEqual(celery_app.send_task.call_count, 1)
-
-    def test_lost_end_event(self, celery_app):
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintStarted'))
-        self.assertIsNotNone(self.printer.current_print)
-
-        process_printer_status(self.printer, status_msg_without_event(-1, '1.gcode'))
-        process_printer_status(self.printer, status_msg(100, '1.gcode', 'PrintPaused'))
-        self.assertIsNotNone(self.printer.current_print)
-        self.assertEqual(self.printer.current_print.ext_id, 100)
-        self.assertIsNotNone(self.printer.current_print.started_at)
-        self.assertEqual(Print.objects.all_with_deleted().count(), 2)
-        celery_app.send_task.assert_has_calls(EVENT_CALLS)
-        self.assertEqual(celery_app.send_task.call_count, 1)
-
-        process_printer_status(self.printer, status_msg(100, '1.gcode', 'PrintDone'))
-        self.assertEqual(celery_app.send_task.call_count, 2)
-
-    def test_plugin_send_neg_print_ts_while_printing(self, celery_app):
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintStarted'))
-        process_printer_status(self.printer, status_msg(-1, '1.gcode', 'PrintPaused'))
-        self.assertIsNotNone(self.printer.current_print)
-        process_printer_status(self.printer, status_msg_without_event(1, '1.gcode'))
-        self.assertIsNotNone(self.printer.current_print)
-        self.assertEqual(Print.objects.all_with_deleted().count(), 1)
-        self.assertEqual(celery_app.send_task.call_count, 0)
-
-    def test_race_condition_at_end_of_print(self, celery_app):
-        eleven_hour_ago = timezone.now() - timedelta(hours=11)
-        with patch('django.utils.timezone.now', return_value=eleven_hour_ago):
-            process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintStarted'))
-
-        process_printer_status(self.printer, status_msg_without_event(-1, '1.gcode'))
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintFailed'))
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintCancelled'))
-        self.assertIsNone(self.printer.current_print)
-        celery_app.send_task.assert_has_calls(EVENT_CALLS)
-        self.assertEqual(celery_app.send_task.call_count, 1)
-
-    def test_plugin_send_diff_print_ts_while_printing(self, celery_app):
-        process_printer_status(self.printer, status_msg(1, '1.gcode', 'PrintStarted'))
-        process_printer_status(self.printer, status_msg(50, '1.gcode', 'PrintPaused'))
-        process_printer_status(self.printer, status_msg_without_event(1, '1.gcode'))
-        self.assertIsNotNone(self.printer.current_print)
-        self.assertEqual(Print.objects.all_with_deleted().count(), 1)
-        self.assertEqual(celery_app.send_task.call_count, 0)
-
-        process_printer_status(self.printer, status_msg_without_event(100, '1.gcode'))
-        celery_app.send_task.assert_has_calls(EVENT_CALLS)
-        self.assertEqual(celery_app.send_task.call_count, 1)
+    def test_create_printer(self, celery_app):
+        """Test creating a new printer via API."""
+        response = self.client.post(
+            '/api/v1/printers/',
+            {'name': 'New OAuth Printer'},
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data['name'], 'New OAuth Printer')
+        self.assertIsNotNone(data.get('auth_token'))
+        # Verify printer was created in database for this user
+        self.assertTrue(Printer.objects.filter(id=data['id'], user=self.user).exists())

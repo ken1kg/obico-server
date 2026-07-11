@@ -17,14 +17,14 @@ export default function BlogSidebar({sidebar, tags}) {
   return (
     <>
       <div className={styles.nozzleNinzaBlock}>
-        <h2>JusPrin 1.0</h2>
-        <h3>The First GenAI 3D Printing Experience <span className={styles.obicoAccent}>Now Available!</span></h3>
+        <h2>Next-Gen AI</h2>
+        <h3>Failure Detection <span className={styles.obicoAccent}>General Release</span></h3>
         <div className={styles.nozzleNizaBadgeImage}>
-          <img src='/img/JUSPRIN_BANNER.png' alt='JusPrin Logo'/>
+          <img src='/img/AI_GENERAL_RELEASE_BANNER.jpg' alt='Next-Gen AI failure detection general release'/>
         </div>
         <div>
-          <a href='https://github.com/TheSpaghettiDetective/JusPrin/releases/latest'>
-            <button className={styles.learnMoreButton}>Try JusPrin Now</button>
+          <a href='https://www.obico.io/blog/next-gen-ai-failure-detection-general-release/'>
+            <button className={styles.learnMoreButton}>Check it out</button>
           </a>
         </div>
       </div>

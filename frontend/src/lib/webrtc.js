@@ -106,7 +106,7 @@ function MJpegWebRTCConnection(streamIdsToTest) {
         get(stream, 'data') || // Janus 0.x format
         find(get(stream, 'media', []), { type: 'data' }) // Janus 1.x format
 
-      if (mjpegStreamExisting) {
+      if (mjpegStreamExisting && baseConnection.callbacks.onStreamAvailable) {
         baseConnection.callbacks.onStreamAvailable(baseConnection)
       }
     } else {
@@ -143,7 +143,7 @@ function H264WebRTCConnection(streamIdsToTest) {
         get(stream, 'video') || // Janus 0.x format
         find(get(stream, 'media', []), { type: 'video' }) // Janus 1.x format
 
-      if (videoStreamExisting) {
+      if (videoStreamExisting && baseConnection.callbacks.onStreamAvailable) {
         baseConnection.callbacks.onStreamAvailable(baseConnection)
       }
     }

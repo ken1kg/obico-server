@@ -6,7 +6,7 @@ import glob
 from sentry_sdk import capture_exception
 
 from .utils import shortform_duration, shortform_localtime, get_rotated_pic_url
-from app.models import calc_normalized_p, MobileDevice, PrinterEvent
+from app.models import MobileDevice, PrinterEvent
 from lib import cache
 
 PRINT_EVENT_MAP = {
@@ -97,7 +97,7 @@ def send_print_progress(_print, op_data):
     if not _print.user.notification_enabled:
         return
 
-    rotated_jpg_url = get_rotated_pic_url(_print.printer)
+    rotated_jpg_url = get_rotated_pic_url(_print.printer, missing_ok=True)
 
     pushed_platforms = set()
 
@@ -137,7 +137,7 @@ def send_print_progress(_print, op_data):
         if printer.not_watching_reason():
             data['title'] += ' | 💤'
         else:
-            p = calc_normalized_p(printer.detective_sensitivity, printer.printerprediction)
+            p = printer.printerprediction.normalized_p
             if p < 0.33:
                 data['title'] += ' | 🟢'
             elif p < 0.66:
@@ -146,7 +146,7 @@ def send_print_progress(_print, op_data):
                 data['title'] += ' | 🔴'
 
         if not rotated_jpg_url:
-            rotated_jpg_url = get_rotated_pic_url(_print.printer)
+            rotated_jpg_url = get_rotated_pic_url(_print.printer, missing_ok=True)
         if rotated_jpg_url:
             data['picUrl'] = rotated_jpg_url
 
